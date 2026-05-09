@@ -54,6 +54,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var automatedActionPolicy: AutomatedActionPolicy
   public var autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod?
   public var shortcutOverrides: [AppShortcutID: AppShortcutOverride]
+  /// Scripts shared across every repository. Always `.custom` kind.
+  public var globalScripts: [ScriptDefinition]
 
   public static let `default` = GlobalSettings(
     appearanceMode: .dark,
@@ -82,7 +84,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     automatedActionPolicy: .cliOnly,
     defaultWorktreeBaseDirectoryPath: nil,
     autoDeleteArchivedWorktreesAfterDays: nil,
-    shortcutOverrides: [:]
+    shortcutOverrides: [:],
+    globalScripts: []
   )
 
   public init(
@@ -112,7 +115,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     automatedActionPolicy: AutomatedActionPolicy = .cliOnly,
     defaultWorktreeBaseDirectoryPath: String? = nil,
     autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod? = nil,
-    shortcutOverrides: [AppShortcutID: AppShortcutOverride] = [:]
+    shortcutOverrides: [AppShortcutID: AppShortcutOverride] = [:],
+    globalScripts: [ScriptDefinition] = []
   ) {
     self.appearanceMode = appearanceMode
     self.defaultEditorID = defaultEditorID
@@ -141,6 +145,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.defaultWorktreeBaseDirectoryPath = defaultWorktreeBaseDirectoryPath
     self.autoDeleteArchivedWorktreesAfterDays = autoDeleteArchivedWorktreesAfterDays
     self.shortcutOverrides = shortcutOverrides
+    self.globalScripts = globalScripts
   }
 
   /// Keys for reading renamed settings fields that no longer
@@ -252,5 +257,18 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     shortcutOverrides =
       try container.decodeIfPresent([AppShortcutID: AppShortcutOverride].self, forKey: .shortcutOverrides)
       ?? Self.default.shortcutOverrides
+    // Force `.custom` so a forged `kind` can't hijack the primary toolbar slot.
+    // No legacy migration here, so missing-key and corrupt-array both collapse
+    // to `[]` (unlike `RepositorySettings.scripts` which distinguishes them).
+    let decoded: [ScriptDefinition] = container.decodeLossyArrayIfPresent(forKey: .globalScripts) ?? []
+    globalScripts = decoded.map {
+      var script = $0
+      // Intentionally one-way — every load rewrites kind to `.custom`. Don't
+      // remove this assignment if a future schema legitimately needs another
+      // kind for globals; introduce a separate field instead.
+      script.kind = .custom
+      if script.name.isEmpty { script.name = ScriptKind.custom.defaultName }
+      return script
+    }
   }
 }

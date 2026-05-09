@@ -39,7 +39,8 @@ struct WorktreeDetailView: View {
       && loadingInfo == nil
       && !showsMultiSelectionSummary
     let openActionSelection = state.openActionSelection
-    let scripts = state.scripts
+    let repoScripts = state.repoScripts
+    let globalScripts = state.globalScripts
     let runningScriptIDs = state.runningScriptIDs
     let notificationGroups = repositories.toolbarNotificationGroups(terminalManager: terminalManager)
     let unseenNotificationWorktreeCount = notificationGroups.reduce(0) { count, repository in
@@ -66,7 +67,8 @@ struct WorktreeDetailView: View {
           unseenNotificationWorktreeCount: unseenNotificationWorktreeCount,
           openActionSelection: openActionSelection,
           showExtras: commandKeyObserver.isPressed,
-          scripts: scripts,
+          repoScripts: repoScripts,
+          globalScripts: globalScripts,
           runningScriptIDs: runningScriptIDs,
         )
         WorktreeToolbarContent(
@@ -89,9 +91,12 @@ struct WorktreeDetailView: View {
           onRunNamedScript: { store.send(.runNamedScript($0)) },
           onStopScript: { store.send(.stopScript($0)) },
           onStopRunScripts: { store.send(.stopRunScripts) },
-          onManageScripts: {
+          onManageRepoScripts: {
             let repositoryID = selectedWorktree.repositoryRootURL.path(percentEncoded: false)
             store.send(.settings(.setSelection(.repositoryScripts(repositoryID))))
+          },
+          onManageGlobalScripts: {
+            store.send(.settings(.setSelection(.scripts)))
           }
         )
       }
@@ -292,6 +297,28 @@ struct WorktreeDetailView: View {
     let stopRunScript: (() -> Void)?
   }
 
+  fileprivate struct ScriptMenuIdentity: Hashable {
+    let rootURL: URL
+    let repoFingerprints: [ScriptFingerprint]
+    let globalFingerprints: [ScriptFingerprint]
+  }
+
+  fileprivate struct ScriptFingerprint: Hashable {
+    let id: UUID
+    let displayName: String
+    let resolvedSystemImage: String
+    let resolvedTintColor: RepositoryColor
+    let isCommandBlank: Bool
+
+    init(_ script: ScriptDefinition) {
+      id = script.id
+      displayName = script.displayName
+      resolvedSystemImage = script.resolvedSystemImage
+      resolvedTintColor = script.resolvedTintColor
+      isCommandBlank = script.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+  }
+
   fileprivate struct WorktreeToolbarState {
     // Folders have no git remote, so the PR payload is scoped to
     // `.git` — this makes "folder with a pull request" unrepresentable.
@@ -308,7 +335,8 @@ struct WorktreeDetailView: View {
     let unseenNotificationWorktreeCount: Int
     let openActionSelection: OpenWorktreeAction
     let showExtras: Bool
-    let scripts: [ScriptDefinition]
+    let repoScripts: [ScriptDefinition]
+    let globalScripts: [ScriptDefinition]
     let runningScriptIDs: Set<UUID>
 
     var isFolder: Bool {
@@ -319,14 +347,36 @@ struct WorktreeDetailView: View {
       if case .git(let pullRequest) = kind { pullRequest } else { nil }
     }
 
+    var allScripts: [ScriptDefinition] {
+      .merged(repo: repoScripts, global: globalScripts)
+    }
+
+    // Drop globals shadowed by repo IDs (handled by `merged`) and globals with
+    // empty commands so half-configured entries don't surface in N repo toolbars.
+    var visibleGlobalScripts: [ScriptDefinition] {
+      Array(allScripts.dropFirst(repoScripts.count))
+        .filter { !$0.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    // NSMenu cache key — fingerprint covers only what the toolbar Menu actually renders
+    // (display name, icon, tint, has-command). Editing a command body is a no-op for the
+    // identity, which avoids per-keystroke menu rebuilds while still catching renames.
+    var scriptMenuIdentity: ScriptMenuIdentity {
+      ScriptMenuIdentity(
+        rootURL: rootURL,
+        repoFingerprints: repoScripts.map(ScriptFingerprint.init),
+        globalFingerprints: globalScripts.map(ScriptFingerprint.init),
+      )
+    }
+
     /// The first `.run`-kind script, if any.
     var primaryScript: ScriptDefinition? {
-      scripts.primaryScript
+      allScripts.primaryScript
     }
 
     /// Whether any `.run`-kind script is currently running.
     var hasRunningRunScript: Bool {
-      scripts.hasRunningRunScript(in: runningScriptIDs)
+      allScripts.hasRunningRunScript(in: runningScriptIDs)
     }
 
     var runScriptHelpText: String {
@@ -354,7 +404,8 @@ struct WorktreeDetailView: View {
     let onRunNamedScript: (ScriptDefinition) -> Void
     let onStopScript: (ScriptDefinition) -> Void
     let onStopRunScripts: () -> Void
-    let onManageScripts: () -> Void
+    let onManageRepoScripts: () -> Void
+    let onManageGlobalScripts: () -> Void
 
     var body: some ToolbarContent {
       ToolbarItem {
@@ -401,10 +452,11 @@ struct WorktreeDetailView: View {
           onRunNamedScript: onRunNamedScript,
           onStopScript: onStopScript,
           onStopRunScripts: onStopRunScripts,
-          onManageScripts: onManageScripts
+          onManageRepoScripts: onManageRepoScripts,
+          onManageGlobalScripts: onManageGlobalScripts
         )
-        // Rebuild the NSMenu per repo; the toolbar Menu otherwise caches first-opened items (#280).
-        .id(toolbarState.rootURL)
+        // Rebuild the NSMenu when any field changes (#280) so renames propagate without a worktree switch.
+        .id(toolbarState.scriptMenuIdentity)
         .transaction { $0.animation = nil }
       }
     }
@@ -776,7 +828,8 @@ private struct ScriptMenu: View {
   let onRunNamedScript: (ScriptDefinition) -> Void
   let onStopScript: (ScriptDefinition) -> Void
   let onStopRunScripts: () -> Void
-  let onManageScripts: () -> Void
+  let onManageRepoScripts: () -> Void
+  let onManageGlobalScripts: () -> Void
   @Environment(CommandKeyObserver.self) private var commandKeyObserver
 
   private var primaryScript: ScriptDefinition? {
@@ -786,33 +839,27 @@ private struct ScriptMenu: View {
   var body: some View {
     let hasRunning = toolbarState.hasRunningRunScript
     Menu {
-      ForEach(toolbarState.scripts) { script in
-        let isRunning = toolbarState.runningScriptIDs.contains(script.id)
-        Button {
-          if isRunning {
-            onStopScript(script)
-          } else {
-            onRunNamedScript(script)
-          }
-        } label: {
-          Label {
-            Text(isRunning ? "Stop \(script.displayName)" : script.displayName)
-          } icon: {
-            Image.tintedSymbol(
-              isRunning ? "stop" : script.resolvedSystemImage,
-              color: script.resolvedTintColor.nsColor,
-            )
-          }
+      scriptButtons(for: toolbarState.repoScripts)
+      let visibleGlobals = toolbarState.visibleGlobalScripts
+      if !visibleGlobals.isEmpty {
+        if !toolbarState.repoScripts.isEmpty {
+          Divider()
         }
-        .help(isRunning ? "Stop \(script.displayName)." : "Run \(script.displayName).")
+        Section("Global") {
+          scriptButtons(for: visibleGlobals)
+        }
       }
-      if !toolbarState.scripts.isEmpty {
+      if !toolbarState.allScripts.isEmpty {
         Divider()
       }
-      Button("Manage Scripts…") {
-        onManageScripts()
+      Button("Manage Repo Scripts…") {
+        onManageRepoScripts()
       }
-      .help("Open repository settings to manage scripts.")
+      .help("Open repository settings to manage repo scripts.")
+      Button("Manage Global Scripts…") {
+        onManageGlobalScripts()
+      }
+      .help("Open settings to manage global scripts.")
     } label: {
       scriptLabel(hasRunning: hasRunning)
     } primaryAction: {
@@ -820,11 +867,45 @@ private struct ScriptMenu: View {
         onStopRunScripts()
       } else if primaryScript != nil {
         onRunScript()
+      } else if toolbarState.repoScripts.isEmpty, !toolbarState.globalScripts.isEmpty {
+        onManageGlobalScripts()
       } else {
-        onManageScripts()
+        onManageRepoScripts()
       }
     }
     .help(primaryHelpText(hasRunning: hasRunning))
+  }
+
+  @ViewBuilder
+  private func scriptButtons(for scripts: [ScriptDefinition]) -> some View {
+    ForEach(scripts) { script in
+      let isRunning = toolbarState.runningScriptIDs.contains(script.id)
+      let hasCommand = !script.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      Button {
+        if isRunning {
+          onStopScript(script)
+        } else {
+          onRunNamedScript(script)
+        }
+      } label: {
+        Label {
+          Text(isRunning ? "Stop \(script.displayName)" : script.displayName)
+        } icon: {
+          Image.tintedSymbol(
+            isRunning ? "stop" : script.resolvedSystemImage,
+            color: script.resolvedTintColor.nsColor,
+          )
+        }
+      }
+      .disabled(!isRunning && !hasCommand)
+      .help(scriptButtonHelp(script: script, isRunning: isRunning, hasCommand: hasCommand))
+    }
+  }
+
+  private func scriptButtonHelp(script: ScriptDefinition, isRunning: Bool, hasCommand: Bool) -> String {
+    if isRunning { return "Stop \(script.displayName)." }
+    if !hasCommand { return "\"\(script.displayName)\" has no command — configure it in Settings." }
+    return "Run \(script.displayName)."
   }
 
   @ViewBuilder
@@ -870,7 +951,8 @@ private struct WorktreeToolbarPreview: View {
       unseenNotificationWorktreeCount: 0,
       openActionSelection: .finder,
       showExtras: false,
-      scripts: [ScriptDefinition(kind: .run, command: "npm run dev")],
+      repoScripts: [ScriptDefinition(kind: .run, command: "npm run dev")],
+      globalScripts: [],
       runningScriptIDs: [],
     )
     let observer = CommandKeyObserver()
@@ -896,7 +978,8 @@ private struct WorktreeToolbarPreview: View {
         onRunNamedScript: { _ in },
         onStopScript: { _ in },
         onStopRunScripts: {},
-        onManageScripts: {}
+        onManageRepoScripts: {},
+        onManageGlobalScripts: {}
       )
     }
     .environment(commandKeyObserver)

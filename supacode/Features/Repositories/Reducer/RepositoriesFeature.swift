@@ -94,7 +94,7 @@ struct RepositoriesFeature {
     var pendingWorktrees: [PendingWorktree] = []
     var pendingSetupScriptWorktreeIDs: Set<Worktree.ID> = []
     var pendingTerminalFocusWorktreeIDs: Set<Worktree.ID> = []
-    var runningScriptsByWorktreeID: [Worktree.ID: [UUID: TerminalTabTintColor]] = [:]
+    var runningScriptsByWorktreeID: [Worktree.ID: [UUID: RepositoryColor]] = [:]
     var archivingWorktreeIDs: Set<Worktree.ID> = []
     var deleteScriptWorktreeIDs: Set<Worktree.ID> = []
     var deletingWorktreeIDs: Set<Worktree.ID> = []
@@ -3183,8 +3183,7 @@ struct RepositoriesFeature {
           repositoryID: repositoryID,
           defaultName: repository.name,
           title: storedTitle,
-          color: storedColor,
-          customColor: storedColor?.color ?? .accentColor
+          color: storedColor
         )
         return .none
 
@@ -3769,10 +3768,10 @@ extension RepositoriesFeature.State {
   }
 
   /// Tint colors for scripts currently running in the given worktree,
-  /// ordered deterministically by script ID. The tint travels alongside
-  /// the running script ID so the color resolves correctly even when
-  /// the worktree belongs to a repository other than the selected one.
-  func runningScriptColors(for worktreeID: Worktree.ID) -> [TerminalTabTintColor] {
+  /// ordered deterministically by script ID. Snapshotted at run-time so a
+  /// live color edit only takes effect on the next run; this also keeps
+  /// the dot rendering when a script is deleted mid-run.
+  func runningScriptColors(for worktreeID: Worktree.ID) -> [RepositoryColor] {
     guard let tintsByID = runningScriptsByWorktreeID[worktreeID] else { return [] }
     return tintsByID.sorted(by: { $0.key < $1.key }).map(\.value)
   }

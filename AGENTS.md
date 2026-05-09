@@ -139,6 +139,23 @@ Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
 - `worktreesForInfoWatcher()` filters out folder repositories so the HEAD watcher never probes a non-git path. The command palette renders folder rows as the repo name alone instead of `Foo / Foo`, and worktree deeplinks (`.archive`, `.unarchive`, `.pin`, `.unpin`) reject folder targets with an explanatory alert.
 - Creating new worktrees on a folder is rejected up front in `createRandomWorktreeInRepository` / `createWorktreeInRepository` and in the `.repoWorktreeNew` deeplink handler — the menu / hotkey / palette never reaches `gitClient.createWorktreeStream` for a folder target.
 
+## Scripts (repo + global)
+
+- A `ScriptDefinition` (`SupacodeSettingsShared/Models/ScriptDefinition.swift`) is the user-facing run target for the toolbar Script Menu, command palette, and `runScript` deeplinks. Repo scripts persist in `RepositorySettings.scripts`; user-global scripts persist in `GlobalSettings.globalScripts`.
+- Globals are always `ScriptKind.custom` — enforced by `SettingsFeature.addGlobalScript` (constructor) and `GlobalSettings.init(from:)`'s decode normalization. These are the load-bearing pair against a forged `"kind": "run"` global hijacking the primary toolbar slot. `merged`'s "repo first" ordering is a semantic UX choice, not a security guard — a future reorder for UX (alphabetical, recency) must not be relied on for invariant enforcement.
+- `[ScriptDefinition].merged(repo:global:)` is the canonical merge: repo first, then globals, deduped by ID with repo winning collisions. Four call sites with deliberately different inputs — `AppFeature.State.allScripts` (TCA state), `AppFeature`'s deeplink `resolveScript(scriptID:in:)` (reads `@SharedReader` pre-state-load), `WorktreeToolbarState.allScripts` (toolbar VM), and `supacodeApp.swift`'s socket query (persisted snapshot for arbitrary worktree). Don't unify them.
+- `AppFeature.State.resolveScript(id:)` is the single canonical lookup helper for state-resident scripts; `runNamedScript` re-resolves through it so a stale view binding can't bypass repo-wins or run a since-deleted script.
+- The toolbar `ScriptMenu` filters globals through `WorktreeToolbarState.visibleGlobalScripts` — drops globals shadowed by a repo ID and globals with empty commands, so half-configured entries don't surface in N repo toolbars.
+- Removing a script does not stop running instances — the alert copy warns the user. The terminal tab cleans up on natural completion or manual close.
+- Decode resilience: `KeyedDecodingContainer.decodeLossyArrayIfPresent(forKey:)` (in `Lossy.swift`) is the API — it returns `nil` on missing key (caller may run a legacy migration), `[]` on a malformed array, and `[T]` with bad elements logged and dropped. `ScriptDefinition.init(from:)` uses `try?` on `tintColor` / `systemImage` so a malformed override drops the field, not the whole entry.
+- Settings deeplink: `supacode://settings/scripts` opens the Global Scripts pane. CLI: `supacode settings scripts`.
+
+## Colors
+
+- `RepositoryColor` (`SupacodeSettingsShared/Models/RepositoryColor.swift`) is the canonical user-customizable tint enum, used by sidebar repo headers, script icons, terminal tab tints, sidebar running-script dots, layout snapshots, and `runningScriptsByWorktreeID`. Predefined cases: `red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`. The `.custom(hex)` case carries `#RRGGBB[AA]`.
+- `ColorSwatchRow` (`SupacodeSettingsFeature/Views/ColorSwatchRow.swift`) is the shared swatch picker used by repository customization (`RepositoryCustomizationView`) and per-script color overrides. The picker binds through a `Binding<Color>(get/set)` so predefined / Default clicks set the color directly without the panel demoting them to `.custom(hex)` — only view-driven panel drags reach `set` and capture as `.custom(hex)` (intentional intent capture).
+- Forward compat: `RepositoryColor.custom(_:)` encodes as `"#RRGGBB[AA]"`. Older builds (pre-`.custom`) decode tints via a String-rawValue enum and reject hex values. `TerminalLayoutSnapshot.TabSnapshot.tintColor` and `ScriptDefinition.tintColor` both lossy-decode the field on the current build, but this only protects forward (old data on new build) — a custom-hex tint persisted on this build is silently dropped on downgrade. Don't ship a downgrade-via-Sparkle path for users who may have set custom tints.
+
 ## Submodules
 
 - `ThirdParty/ghostty` (`https://github.com/ghostty-org/ghostty`): Source dependency used to build `Frameworks/GhosttyKit.xcframework` and terminal resources.
